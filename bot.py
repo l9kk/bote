@@ -19,6 +19,15 @@ from aiogram.filters import CommandObject
 
 from config import BOT_TOKEN, OPENAI_API_KEY, MUSIC_EXTENSIONS, PROXY_URL
 
+# Add this at the beginning of your bot.py file, after imports but before creating the bot
+if not BOT_TOKEN:
+    print("\n⚠️  CONFIGURATION ERROR ⚠️")
+    print("BOT_TOKEN environment variable is missing!")
+    print("Make sure you've set the BOT_TOKEN in your Railway variables.")
+    print("If running locally, check your .env file or set the environment variable.")
+    print("Example: BOT_TOKEN=1234567890:ABCDEF-ghijklmnopqrstuvwxyz\n")
+    sys.exit(1)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
