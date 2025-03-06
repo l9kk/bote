@@ -14,6 +14,8 @@ from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.enums import ContentType
+from aiogram.filters import CommandObject
 
 from config import BOT_TOKEN, OPENAI_API_KEY, MUSIC_EXTENSIONS, PROXY_URL
 
@@ -104,32 +106,25 @@ def get_file_extension(file_name: str) -> str:
     return ext
 
 
-def create_bot() -> Bot:
-    """Create and configure the bot with proper proxy settings."""
-    session = None
+from aiogram.client.default import DefaultBotProperties
 
+def create_bot() -> Bot:
+    """Create a bot instance with correct default properties."""
+    session = None
     if PROXY_URL:
         try:
-            # Check if aiohttp_socks is installed
-            import aiohttp_socks  # noqa: F401
-
-            logger.info(f"Proxy URL configured: {PROXY_URL}")
-            session = AiohttpSession()
-            session.proxy = PROXY_URL
+            import aiohttp_socks
+            session = AiohttpSession(proxy=PROXY_URL)
         except ImportError:
-            logger.error("aiohttp_socks package is not installed. "
-                         "Please run: pip install aiohttp-socks")
-            print("\n⚠️  DEPENDENCY ERROR ⚠️")
-            print("The aiohttp_socks package is required for proxy support.")
-            print("Please install it with: pip install aiohttp-socks\n")
+            logger.error("aiohttp_socks package is not installed. Run 'pip install aiohttp-socks'")
             sys.exit(1)
 
     try:
-        # Create bot with or without session
-        if session:
-            return Bot(token=BOT_TOKEN, parse_mode="HTML", session=session)
-        else:
-            return Bot(token=BOT_TOKEN, parse_mode="HTML")
+        return Bot(
+            token=BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode="HTML"),
+            session=session
+        )
     except Exception as e:
         logger.error(f"Error creating bot: {e}")
         raise
@@ -239,115 +234,81 @@ async def cmd_nettest(message: types.Message):
 
     await status_msg.edit_text(result)
 
+@dp.message(F.content_type.in_([ContentType.AUDIO, ContentType.DOCUMENT]))
+async def collect_music_from_messages(message: types.Message):
+    chat_id = message.chat.id
+    chat_music_files.setdefault(chat_id, [])
+
+    file_name = None
+
+    if message.audio:
+        file_name = message.audio.file_name or f"{message.audio.performer} - {message.audio.title}"
+        chat_music_files[chat_id].append(file_name)
+        logger.info(f"Collected audio: {file_name} from chat {chat_id}")
+
+    elif message.document:
+        file_name = message.document.file_name
+        if get_file_extension(file_name) in MUSIC_EXTENSIONS:
+            chat_music_files[chat_id].append(file_name)
+            logger.info(f"Collected document: {file_name} from chat {chat_id}")
 
 @dp.message(Command("collect"))
-async def cmd_collect(message: types.Message):
-    """Start collecting music files from the chat."""
-    chat_id = message.chat.id
+async def cmd_collect(message: types.Message, command: CommandObject):
+    target_chat = command.args
+    if not target_chat:
+        await message.reply(
+            "Please specify a chat username or ID:\n"
+            "`/collect @chatusername` or `/collect -1001234567890`",
+            parse_mode='Markdown'
+        )
+        return
 
-    # Reset the file list for this chat
-    chat_music_files[chat_id] = []
+    # Resolve real chat_id from provided username or ID
+    try:
+        target_chat_obj = await bot.get_chat(target_chat)
+        target_chat_id = target_chat_obj.id
+    except Exception as e:
+        logger.error(f"Failed to resolve chat_id: {e}")
+        await message.answer("❌ Could not find the specified chat. Check permissions and access.")
+        return
 
-    processing_msg = await message.answer("🔍 Starting to collect music files from this chat...")
+    # Check if music files already collected for the specified chat
+    count = len(chat_music_files.get(target_chat_id, []))
+    if count == 0:
+        await message.answer("❌ No music collected yet for this chat. Please send or forward music files there so the bot can start collecting them.")
+        return
 
-    # For demo purposes, add some sample music files
-    # Note: In aiogram 3.x, bots need admin privileges to access message history
-    sample_files = [
-        "Ed Sheeran - Shape of You",
-        "The Weeknd - Blinding Lights",
-        "Dua Lipa - Levitating",
-        "BTS - Dynamite",
-        "Taylor Swift - Anti-Hero",
-        "Billie Eilish - Bad Guy",
-        "Harry Styles - As It Was",
-        "Post Malone - Circles",
-        "Drake - God's Plan",
-        "Adele - Easy On Me",
-        "Justin Bieber - Peaches",
-        "Olivia Rodrigo - drivers license",
-        "Lil Nas X - MONTERO",
-        "Ariana Grande - positions",
-        "Doja Cat - Kiss Me More",
-        "Ed Sheeran - Shape of You",  # Duplicates to test frequency
-        "The Weeknd - Blinding Lights",
-        "Dua Lipa - Levitating",
-        "BTS - Dynamite",
-        "Taylor Swift - Anti-Hero"
-    ]
-
-    chat_music_files[chat_id].extend(sample_files)
-    count = len(sample_files)
-
-    # Create analyze button
+    # Create the Analyze button
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(
         text=f"📊 Analyze {count} Music Files",
-        callback_data="analyze_music"
+        callback_data=f"analyze_music:{target_chat_id}"
     ))
 
-    await processing_msg.edit_text(
-        f"✅ Done! Collected {count} music files from this chat.\n"
-        f"<i>Note: Using sample data since direct history collection requires admin rights.</i>",
+    await message.answer(
+        f"✅ Found {count} music files in chat {target_chat}.",
         reply_markup=keyboard.as_markup()
     )
 
-
-@dp.callback_query(F.data == "analyze_music")
+@dp.callback_query(F.data.startswith("analyze_music"))
 async def analyze_music_callback(callback: types.CallbackQuery):
-    """Handle the analyze music button press."""
     chat_id = callback.message.chat.id
 
-    if not chat_id in chat_music_files or not chat_music_files[chat_id]:
-        await callback.message.edit_text("❌ No music files to analyze. Use /collect first.")
+    # Check if any music files collected for this chat
+    if not chat_music_files.get(chat_id):
+        await callback.message.edit_text("❌ No music to analyze. Please use /collect first.")
         await callback.answer()
         return
 
-    await callback.message.edit_text("🧠 Analyzing music frequency... Please wait...")
+    await callback.message.edit_text("🧠 Analyzing music... Please wait...")
 
-    try:
-        # Create a frequency count first
-        music_count = defaultdict(int)
-        for file_name in chat_music_files[chat_id]:
-            music_count[file_name] += 1
+    music_count = defaultdict(int)
+    for file_name in chat_music_files[chat_id]:
+        music_count[file_name] += 1
 
-        # Try OpenAI analysis first, fall back to local analysis if it fails
-        response = None
-        try:
-            # Convert to list for ChatGPT
-            music_list = [f"{name} (count: {count})" for name, count in music_count.items()]
-            music_list_text = "\n".join(music_list[:100])  # Limit to 100 entries to avoid token limits
+    response = await local_analyze_music(music_count)
 
-            if music_list_text:  # Only call API if we have data
-                response = await analyze_with_openai(music_list_text)
-        except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            response = None
-
-        # Fallback to local analysis if OpenAI fails
-        if not response:
-            response = await local_analyze_music(music_count)
-
-        # Display results with pagination if needed
-        if len(response) > 3900:  # Buffer for HTML tags
-            # Split into multiple messages if too long
-            chunks = [response[i:i + 3900] for i in range(0, len(response), 3900)]
-            for i, chunk in enumerate(chunks):
-                await callback.message.answer(
-                    f"📊 Music Analysis ({i + 1}/{len(chunks)}):\n\n{chunk}"
-                )
-        else:
-            await callback.message.answer(
-                f"📊 Music Analysis:\n\n{response}"
-            )
-
-        # Update the original message
-        await callback.message.edit_text(
-            f"✅ Analysis complete! {len(music_count)} unique tracks found."
-        )
-    except Exception as e:
-        logger.error(f"Analysis error: {e}")
-        await callback.message.answer(f"❌ Error analyzing music: {str(e)}")
-
+    await callback.message.answer(response)
     await callback.answer()
 
 
