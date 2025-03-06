@@ -78,3 +78,7 @@ coverage.xml
 .hypothesis/
 
 .idea
+.env
+.env.prod
+.env.railway
+.env.*
