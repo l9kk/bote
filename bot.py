@@ -108,6 +108,7 @@ def get_file_extension(file_name: str) -> str:
 
 from aiogram.client.default import DefaultBotProperties
 
+
 def create_bot() -> Bot:
     """Create a bot instance with correct default properties."""
     session = None
@@ -171,7 +172,7 @@ async def cmd_help(message: types.Message):
         "<b>Available commands:</b>\n"
         "/start - Start the bot\n"
         "/help - Show this help message\n"
-        "/collect - Start collecting music files from the chat\n"
+        "/collect - Start collecting music files from the current chat\n"
         "/status - Check the current collection status\n"
         "/clear - Clear the collected file list\n"
         "/nettest - Test network connectivity\n"
@@ -292,29 +293,32 @@ async def collect_music_from_messages(message: types.Message):
 
 @dp.message(Command("collect"))
 async def cmd_collect(message: types.Message, command: CommandObject):
-    target_chat = command.args
-    if not target_chat:
-        await message.reply(
-            "Please specify a chat username or ID:\n"
-            "`/collect @chatusername` or `/collect -1001234567890`",
-            parse_mode='Markdown'
-        )
-        return
-
-    # Resolve real chat_id from provided username or ID
-    try:
-        target_chat_obj = await bot.get_chat(target_chat)
-        target_chat_id = target_chat_obj.id
-    except Exception as e:
-        logger.error(f"Failed to resolve chat_id: {e}")
-        await message.answer("❌ Could not find the specified chat. Check permissions and access.")
-        return
+    """
+    Handle the /collect command.
+    If no argument is provided, use the current chat's ID.
+    Otherwise, try to resolve the provided chat identifier.
+    """
+    # Use the current chat ID if no specific chat is provided
+    if not command.args:
+        target_chat_id = message.chat.id
+        target_chat_name = message.chat.title or message.chat.username or f"Chat {target_chat_id}"
+    else:
+        # Original behavior for when a specific chat is provided
+        target_chat = command.args
+        try:
+            target_chat_obj = await bot.get_chat(target_chat)
+            target_chat_id = target_chat_obj.id
+            target_chat_name = target_chat_obj.title or target_chat_obj.username or str(target_chat)
+        except Exception as e:
+            logger.error(f"Failed to resolve chat_id: {e}")
+            await message.answer("❌ Could not find the specified chat. Check permissions and access.")
+            return
 
     # Check if music files already collected for the specified chat
     count = len(chat_music_files.get(target_chat_id, []))
     if count == 0:
         await message.answer(
-            "❌ No music collected yet for this chat. Please send or forward music files there so the bot can start collecting them.")
+            f"❌ No music collected yet for {target_chat_name}. Please send or forward music files there so the bot can start collecting them.")
         return
 
     # Create the Analyze button
@@ -325,16 +329,30 @@ async def cmd_collect(message: types.Message, command: CommandObject):
     ))
 
     await message.answer(
-        f"✅ Found {count} music files in chat {target_chat}.",
+        f"✅ Found {count} music files in {target_chat_name}.",
         reply_markup=keyboard.as_markup()
     )
 
+
 @dp.callback_query(F.data.startswith("analyze_music"))
 async def analyze_music_callback(callback: types.CallbackQuery):
-    chat_id = callback.message.chat.id
+    # Extract the target chat_id from the callback data
+    parts = callback.data.split(":")
+
+    if len(parts) > 1:
+        # If specific chat_id was provided in the callback data
+        try:
+            target_chat_id = int(parts[1])
+        except ValueError:
+            await callback.message.edit_text("❌ Invalid chat ID format.")
+            await callback.answer()
+            return
+    else:
+        # Default to current chat
+        target_chat_id = callback.message.chat.id
 
     # Check if any music files collected for this chat
-    if not chat_music_files.get(chat_id):
+    if not chat_music_files.get(target_chat_id):
         await callback.message.edit_text("❌ No music to analyze. Please use /collect first.")
         await callback.answer()
         return
@@ -342,7 +360,7 @@ async def analyze_music_callback(callback: types.CallbackQuery):
     await callback.message.edit_text("🧠 Analyzing music... Please wait...")
 
     music_count = defaultdict(int)
-    for file_name in chat_music_files[chat_id]:
+    for file_name in chat_music_files[target_chat_id]:
         music_count[file_name] += 1
 
     response = await local_analyze_music(music_count)
@@ -367,7 +385,7 @@ async def cmd_status(message: types.Message):
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(
         text=f"📊 Analyze {total_count} Music Files",
-        callback_data="analyze_music"
+        callback_data=f"analyze_music:{chat_id}"
     ))
 
     await message.answer(
