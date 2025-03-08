@@ -19,15 +19,6 @@ from aiogram.filters import CommandObject
 
 from config import BOT_TOKEN, OPENAI_API_KEY, MUSIC_EXTENSIONS, PROXY_URL
 
-# Add this at the beginning of your bot.py file, after imports but before creating the bot
-if not BOT_TOKEN:
-    print("\n⚠️  CONFIGURATION ERROR ⚠️")
-    print("BOT_TOKEN environment variable is missing!")
-    print("Make sure you've set the BOT_TOKEN in your Railway variables.")
-    print("If running locally, check your .env file or set the environment variable.")
-    print("Example: BOT_TOKEN=1234567890:ABCDEF-ghijklmnopqrstuvwxyz\n")
-    sys.exit(1)
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -243,23 +234,61 @@ async def cmd_nettest(message: types.Message):
 
     await status_msg.edit_text(result)
 
+
+async def extract_music_info(message: types.Message) -> str:
+    """
+    Extract music information from a Telegram message in the following order of preference:
+    1. Audio metadata (performer + title)
+    2. Audio title only
+    3. Caption (if provided with the music)
+    4. File name (as last resort)
+    """
+    # Case 1: Standard audio file with metadata
+    if message.audio:
+        # Build the music info string from available metadata
+        performer = message.audio.performer or ""
+        title = message.audio.title or ""
+
+        if performer and title:
+            return f"{performer} - {title}"
+        elif title:
+            return title
+        elif performer:
+            return performer
+        else:
+            # Only use filename as a last resort
+            return message.audio.file_name or "Unknown Audio"
+
+    # Case 2: Document type that might be music
+    elif message.document and get_file_extension(message.document.file_name) in MUSIC_EXTENSIONS:
+        # Try to get info from caption first
+        if message.caption:
+            return message.caption
+        else:
+            return message.document.file_name
+
+    # Fallback for edge cases
+    return "Unknown Music"
+
+
 @dp.message(F.content_type.in_([ContentType.AUDIO, ContentType.DOCUMENT]))
 async def collect_music_from_messages(message: types.Message):
     chat_id = message.chat.id
     chat_music_files.setdefault(chat_id, [])
 
-    file_name = None
+    # Check if the message has audio or a document that might be music
+    if message.audio or (message.document and
+                         get_file_extension(message.document.file_name) in MUSIC_EXTENSIONS):
+        # Extract the best available music information
+        music_info = await extract_music_info(message)
 
-    if message.audio:
-        file_name = message.audio.file_name or f"{message.audio.performer} - {message.audio.title}"
-        chat_music_files[chat_id].append(file_name)
-        logger.info(f"Collected audio: {file_name} from chat {chat_id}")
+        # Add to our tracking dictionary
+        chat_music_files[chat_id].append(music_info)
 
-    elif message.document:
-        file_name = message.document.file_name
-        if get_file_extension(file_name) in MUSIC_EXTENSIONS:
-            chat_music_files[chat_id].append(file_name)
-            logger.info(f"Collected document: {file_name} from chat {chat_id}")
+        # Log the collection
+        source = "audio" if message.audio else "document"
+        logger.info(f"Collected {source}: {music_info} from chat {chat_id}")
+
 
 @dp.message(Command("collect"))
 async def cmd_collect(message: types.Message, command: CommandObject):
@@ -284,7 +313,8 @@ async def cmd_collect(message: types.Message, command: CommandObject):
     # Check if music files already collected for the specified chat
     count = len(chat_music_files.get(target_chat_id, []))
     if count == 0:
-        await message.answer("❌ No music collected yet for this chat. Please send or forward music files there so the bot can start collecting them.")
+        await message.answer(
+            "❌ No music collected yet for this chat. Please send or forward music files there so the bot can start collecting them.")
         return
 
     # Create the Analyze button
